@@ -3,6 +3,7 @@ import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "./AuthContext";
 import { ProtectedRoute } from "./ProtectedRoute";
+import { ThemeProvider, useTheme } from "./ThemeContext";
 import { AuditLogsPage } from "../pages/AuditLogsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { LoginPage } from "../pages/LoginPage";
@@ -100,6 +101,34 @@ function LogoutIcon() {
   );
 }
 
+function SunIcon() {
+  return (
+    <IconShell>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.5v2.5" strokeLinecap="round" />
+      <path d="M12 19v2.5" strokeLinecap="round" />
+      <path d="M4.9 4.9l1.8 1.8" strokeLinecap="round" />
+      <path d="M17.3 17.3l1.8 1.8" strokeLinecap="round" />
+      <path d="M2.5 12H5" strokeLinecap="round" />
+      <path d="M19 12h2.5" strokeLinecap="round" />
+      <path d="M4.9 19.1l1.8-1.8" strokeLinecap="round" />
+      <path d="M17.3 6.7l1.8-1.8" strokeLinecap="round" />
+    </IconShell>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <IconShell>
+      <path
+        d="M18.5 14.5A6.5 6.5 0 0 1 9.5 5.5a7.5 7.5 0 1 0 9 9Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </IconShell>
+  );
+}
+
 const links = [
   { to: "/", label: "Dashboard", icon: <DashboardIcon /> },
   { to: "/reports", label: "Reports", icon: <ReportsIcon /> },
@@ -115,6 +144,7 @@ function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(true);
   const { memberships, logout, user } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const primaryMembership = memberships[0];
   const isMasterAdmin = primaryMembership?.role === "master_admin";
   const visibleLinks = links.filter((link) => {
@@ -122,9 +152,15 @@ function AppShell() {
     return link.to === "/" || link.to === "/profiles" || link.to === "/reviews";
   });
   const currentPageLabel = visibleLinks.find((link) => location.pathname === link.to)?.label ?? "Workspace";
+  const themeIcon = theme === "dark" ? <SunIcon /> : <MoonIcon />;
+  const themeLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+  const sidebarThemeClass =
+    theme === "dark"
+      ? "bg-[linear-gradient(180deg,#121b1a_0%,#0d1413_100%)]"
+      : "bg-[linear-gradient(180deg,#f8f3ea_0%,#f2eadc_100%)]";
 
   return (
-    <div className="min-h-screen bg-sand text-ink">
+    <div className="min-h-screen bg-sand text-ink transition-colors">
       {sidebarOpen ? (
         <button
           type="button"
@@ -137,7 +173,8 @@ function AppShell() {
       <div className="flex min-h-screen w-full">
         <aside
           className={[
-            "fixed inset-y-0 left-0 z-40 flex h-screen flex-col border-r border-ink/10 bg-[linear-gradient(180deg,#f8f3ea_0%,#f2eadc_100%)] px-4 py-6 transition-all duration-300",
+            "fixed inset-y-0 left-0 z-40 flex h-screen flex-col border-r border-ink/10 px-4 py-6 transition-all duration-300",
+            sidebarThemeClass,
             sidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
             sidebarExpanded ? "w-[16rem] xl:w-[17rem]" : "w-[5.5rem]",
           ].join(" ")}
@@ -184,6 +221,28 @@ function AppShell() {
             </div>
           </div>
 
+          {sidebarExpanded ? (
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={themeLabel}
+              title={themeLabel}
+              className="mt-6 flex items-center justify-center rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink/70 transition hover:border-rust hover:text-rust"
+            >
+              {themeIcon}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={themeLabel}
+              title={themeLabel}
+              className="mt-6 flex h-12 w-12 items-center justify-center self-center rounded-2xl border border-ink/10 bg-white text-ink/55 transition hover:border-rust hover:text-rust"
+            >
+              {themeIcon}
+            </button>
+          )}
+
           <nav className={sidebarExpanded ? "mt-10 grid gap-3" : "mt-8 grid justify-items-center gap-4"}>
             {visibleLinks.map((link) => (
               <NavLink
@@ -200,7 +259,7 @@ function AppShell() {
                       : "flex h-12 w-12 items-center justify-center justify-self-center",
                     isActive
                       ? "bg-pine text-sand shadow-[0_12px_30px_rgba(24,69,59,0.2)]"
-                      : "text-ink/50 hover:bg-white/80 hover:text-rust",
+                      : "text-ink/50 hover:bg-pine/10 hover:text-rust dark:hover:bg-pine/20",
                   ].join(" ")
                 }
               >
@@ -246,14 +305,25 @@ function AppShell() {
                 <h2 className="mt-3 text-lg font-medium text-ink/65">{currentPageLabel}</h2>
               </div>
 
-              <button
-                type="button"
-                aria-label="Open sidebar"
-                className="inline-flex w-fit items-center rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm font-medium transition hover:border-rust hover:text-rust md:hidden"
-                onClick={() => setSidebarOpen(true)}
-              >
-                Menu
-              </button>
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={toggleTheme}
+                  aria-label={themeLabel}
+                  title={themeLabel}
+                  className="inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-ink/10 bg-white text-ink/70 transition hover:border-rust hover:text-rust"
+                >
+                  {themeIcon}
+                </button>
+                <button
+                  type="button"
+                  aria-label="Open sidebar"
+                  className="inline-flex w-fit items-center rounded-2xl border border-ink/10 bg-white px-4 py-3 text-sm font-medium transition hover:border-rust hover:text-rust md:hidden"
+                  onClick={() => setSidebarOpen(true)}
+                >
+                  Menu
+                </button>
+              </div>
             </div>
           </header>
 
@@ -274,18 +344,20 @@ function AppShell() {
 
 export function App() {
   return (
-    <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route
-          path="/*"
-          element={
-            <ProtectedRoute>
-              <AppShell />
-            </ProtectedRoute>
-          }
-        />
-      </Routes>
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/*"
+            element={
+              <ProtectedRoute>
+                <AppShell />
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </AuthProvider>
+    </ThemeProvider>
   );
 }

@@ -34,6 +34,7 @@ GBP_REVIEWS_URL = "https://mybusiness.googleapis.com/v4/{parent}/reviews"
 GBP_REPLY_URL = "https://mybusiness.googleapis.com/v4/{review_name}/reply"
 LOCATION_READ_MASK = ",".join(
     [
+        "name",
         "title",
         "storeCode",
         "websiteUri",
@@ -67,6 +68,11 @@ def _format_sync_error(exc: Exception) -> str:
 
 
 def ensure_google_oauth_configured() -> None:
+    print("google_oauth_client_id:", settings.google_oauth_client_id)
+    print("google_oauth_client_secret:", settings.google_oauth_client_secret)
+    print("google_oauth_redirect_uri:", settings.google_oauth_redirect_uri)
+    print("google_token_encryption_key:", settings.google_token_encryption_key)
+
     required = [
         settings.google_oauth_client_id,
         settings.google_oauth_client_secret,
@@ -181,6 +187,8 @@ async def fetch_reviews(access_token: str, location_name: str) -> dict:
             headers={"Authorization": f"Bearer {access_token}"},
             params={"pageSize": 50, "orderBy": "updateTime desc"},
         )
+        print("REVIEWS STATUS:", response.status_code, flush=True)
+        print("REVIEWS BODY:", response.text, flush=True)
         response.raise_for_status()
         return response.json()
 
@@ -288,12 +296,15 @@ def _derive_sentiment(star_rating: int) -> ReviewSentimentEnum:
 async def sync_google_account(db: Session, google_account: GoogleAccount) -> SyncResult:
     if not google_account.encrypted_refresh_token or google_account.encrypted_refresh_token == "encrypted-placeholder-token":
         raise ValueError("Google account is a local placeholder and must be replaced by a real OAuth connection")
+    print(f"Syncing Google account {google_account.email} (ID: {google_account.id})", flush=True)
     refresh_token = decrypt_secret(google_account.encrypted_refresh_token)
     access_token = await refresh_access_token(refresh_token)
     google_account.token_last_refreshed_at = datetime.now(UTC)
-
+    print("Access token refreshed successfully", flush=True)
+    print(f"Google account resource: {google_account.google_account_id}", flush=True)
     if not google_account.google_account_id:
         accounts = await fetch_gbp_accounts(access_token)
+        print("GBP accounts response:", accounts, flush=True)
         if not accounts:
             db.commit()
             return SyncResult()
@@ -306,12 +317,14 @@ async def sync_google_account(db: Session, google_account: GoogleAccount) -> Syn
 
     result = SyncResult(connected_accounts=1)
     locations = await fetch_locations(access_token, google_account.google_account_id)
+    print("LOCATIONS RESPONSE:", locations, flush=True)
     result.synced_locations += len(locations)
 
     from app.models.entities import BrandEnum
     from app.models.entities import GBPProfile
 
     for location in locations:
+        print("LOCATION ITEM:", location, flush=True)
         gbp_location_id = location["name"].split("/")[-1]
         profile = db.scalar(select(GBPProfile).where(GBPProfile.gbp_location_id == gbp_location_id))
         if profile is None:
@@ -336,7 +349,9 @@ async def sync_google_account(db: Session, google_account: GoogleAccount) -> Syn
             profile.state = _extract_state(location)
             profile.last_synced_at = datetime.now(UTC)
 
-        reviews_payload = await fetch_reviews(access_token, location["name"])
+        review_parent = f"{google_account.google_account_id}/{location['name']}"
+        reviews_payload = await fetch_reviews(access_token, review_parent)
+        print("REVIEWS PAYLOAD:", reviews_payload, flush=True)
         review_items = reviews_payload.get("reviews", [])
         payload_ratings = [_extract_rating_value(item.get("starRating")) for item in review_items]
         payload_ratings = [value for value in payload_ratings if value]
@@ -347,6 +362,7 @@ async def sync_google_account(db: Session, google_account: GoogleAccount) -> Syn
         profile.last_synced_at = datetime.now(UTC)
 
         for item in review_items:
+            print("REVIEW ITEM:", item, flush=True)
             review_name = item["reviewId"] if "reviewId" in item else item["name"].split("/")[-1]
             star_rating = _extract_rating_value(item.get("starRating"))
             if not star_rating:

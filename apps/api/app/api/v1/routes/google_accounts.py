@@ -26,6 +26,25 @@ from app.services.google_integration import sync_all_google_accounts
 router = APIRouter()
 
 
+async def process_google_oauth_callback(db: Session, code: str, state: str) -> RedirectResponse:
+    try:
+        connected_count = await handle_google_oauth_callback(db, code, state)
+        write_audit_log(
+            db,
+            tenant_id=None,
+            actor_user_id=None,
+            action="google.oauth.completed",
+            target_type="oauth_state",
+            metadata={"connected_accounts": connected_count},
+        )
+        db.commit()
+        redirect_url = f"{settings.web_base_url}/?google_oauth=success"
+    except Exception as exc:
+        redirect_url = f"{settings.web_base_url}/?google_oauth=error&message={quote(str(exc))}"
+
+    return RedirectResponse(url=redirect_url, status_code=302)
+
+
 @router.get("", response_model=GoogleAccountListResponse)
 def get_google_accounts(
     membership: Membership = Depends(require_master_admin),
@@ -102,19 +121,4 @@ async def google_oauth_callback(
     state: str = Query(...),
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
-    try:
-        connected_count = await handle_google_oauth_callback(db, code, state)
-        write_audit_log(
-            db,
-            tenant_id=None,
-            actor_user_id=None,
-            action="google.oauth.completed",
-            target_type="oauth_state",
-            metadata={"connected_accounts": connected_count},
-        )
-        db.commit()
-        redirect_url = f"{settings.web_base_url}/?google_oauth=success"
-    except Exception as exc:
-        redirect_url = f"{settings.web_base_url}/?google_oauth=error&message={quote(str(exc))}"
-
-    return RedirectResponse(url=redirect_url, status_code=302)
+    return await process_google_oauth_callback(db, code, state)
