@@ -274,7 +274,7 @@ function AppShell() {
             onClick={logout}
             title={!sidebarExpanded ? "Sign Out" : undefined}
             className={[
-              "mt-auto rounded-2xl text-sm font-medium text-ink/50 transition-all duration-200 hover:bg-white/80 hover:text-rust",
+              "mt-auto rounded-2xl text-sm font-medium text-ink/50 transition-all duration-200 hover:bg-pine/10 hover:text-rust dark:hover:bg-pine/20",
               sidebarExpanded
                 ? "flex w-full items-center gap-4 px-4 py-3"
                 : "flex h-12 w-12 items-center justify-center self-center",
