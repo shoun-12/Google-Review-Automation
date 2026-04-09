@@ -44,6 +44,10 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/business.manage"
     ]
     google_token_encryption_key: str = ""
+    google_login_client_id: str = ""
+    google_login_client_secret: str = ""
+    google_login_redirect_uri: str = "http://localhost:8000/api/v1/auth/google/callback"
+    google_login_scopes: Annotated[list[str], NoDecode] = ["openid", "email", "profile"]
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
@@ -63,6 +67,18 @@ class Settings(BaseSettings):
     @field_validator("google_oauth_scopes", mode="before")
     @classmethod
     def parse_google_oauth_scopes(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("google_login_scopes", mode="before")
+    @classmethod
+    def parse_google_login_scopes(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             stripped = value.strip()
             if stripped.startswith("["):

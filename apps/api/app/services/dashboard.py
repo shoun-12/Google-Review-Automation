@@ -24,6 +24,7 @@ from app.schemas.google_accounts import GoogleAccountListItem
 from app.schemas.profiles import ProfileListItem
 from app.schemas.reports import SummaryReportResponse
 from app.schemas.reviews import ReviewListItem
+from app.schemas.reviews import ReviewListResponse
 from app.schemas.templates import ReplyTemplateListItem
 from app.schemas.users import UserListItem
 
@@ -46,6 +47,36 @@ def _review_scope_filters(tenant_id: UUID, user_id: UUID | None, role: RoleEnum 
     if role == RoleEnum.LOCAL_ADMIN and user_id is not None:
         filters.append(GBPProfile.primary_local_admin_user_id == user_id)
     return filters
+
+
+def _review_feed_filters(
+    tenant_id: UUID,
+    user_id: UUID | None,
+    role: RoleEnum | None,
+    sentiment: ReviewSentimentEnum | None = None,
+    profile_id: UUID | None = None,
+) -> list:
+    filters = _review_scope_filters(tenant_id, user_id, role)
+    if sentiment is not None:
+        filters.append(Review.sentiment == sentiment)
+    if profile_id is not None:
+        filters.append(Review.gbp_profile_id == profile_id)
+    return filters
+
+
+def _review_listing_query(
+    tenant_id: UUID,
+    user_id: UUID | None,
+    role: RoleEnum | None,
+    sentiment: ReviewSentimentEnum | None = None,
+    profile_id: UUID | None = None,
+):
+    return (
+        select(Review, GBPProfile.business_name, Reply.reply_text)
+        .join(GBPProfile, GBPProfile.id == Review.gbp_profile_id)
+        .outerjoin(Reply, Reply.review_id == Review.id)
+        .where(*_review_feed_filters(tenant_id, user_id, role, sentiment=sentiment, profile_id=profile_id))
+    )
 
 
 def get_summary(
@@ -172,10 +203,7 @@ def list_reviews(
     limit: int = 20,
 ) -> list[ReviewListItem]:
     rows = db.execute(
-        select(Review, GBPProfile.business_name, Reply.reply_text)
-        .join(GBPProfile, GBPProfile.id == Review.gbp_profile_id)
-        .outerjoin(Reply, Reply.review_id == Review.id)
-        .where(*_review_scope_filters(tenant_id, user_id, role))
+        _review_listing_query(tenant_id, user_id, role)
         .order_by(Review.review_posted_at.desc())
         .limit(limit)
     ).all()
@@ -194,6 +222,57 @@ def list_reviews(
         )
         for review, business_name, reply_text in rows
     ]
+
+
+def list_review_feed(
+    db: Session,
+    tenant_id: UUID,
+    user_id: UUID | None = None,
+    role: RoleEnum | None = None,
+    sentiment: ReviewSentimentEnum | None = None,
+    profile_id: UUID | None = None,
+    page: int = 1,
+    page_size: int = 5,
+) -> ReviewListResponse:
+    safe_page = max(page, 1)
+    safe_page_size = min(max(page_size, 1), 50)
+    filters = _review_feed_filters(tenant_id, user_id, role, sentiment=sentiment, profile_id=profile_id)
+
+    total = db.scalar(
+        select(func.count(func.distinct(Review.id)))
+        .select_from(Review)
+        .join(GBPProfile, GBPProfile.id == Review.gbp_profile_id)
+        .where(*filters)
+    ) or 0
+    rows = db.execute(
+        _review_listing_query(tenant_id, user_id, role, sentiment=sentiment, profile_id=profile_id)
+        .order_by(Review.review_posted_at.desc(), Review.created_at.desc())
+        .offset((safe_page - 1) * safe_page_size)
+        .limit(safe_page_size)
+    ).all()
+    total_pages = ((int(total) - 1) // safe_page_size) + 1 if total else 0
+    items = [
+        ReviewListItem(
+            id=review.id,
+            gbp_review_id=review.gbp_review_id,
+            business_name=business_name,
+            reviewer_name=review.reviewer_name,
+            star_rating=review.star_rating,
+            review_text=review.review_text,
+            sentiment=review.sentiment.value,
+            status=review.status.value,
+            review_posted_at=review.review_posted_at,
+            reply_text=reply_text,
+        )
+        for review, business_name, reply_text in rows
+    ]
+    return ReviewListResponse(
+        items=items,
+        total=int(total),
+        page=safe_page,
+        page_size=safe_page_size,
+        total_pages=total_pages,
+    )
 
 
 def list_google_accounts(db: Session, tenant_id) -> list[GoogleAccountListItem]:

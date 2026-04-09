@@ -5,15 +5,21 @@ import { MetricCard } from "../components/MetricCard";
 import { Panel } from "../components/Panel";
 import {
   fetchDashboard,
+  fetchProfiles,
   fetchReportOverview,
+  fetchReviews,
   startGoogleOAuth,
   syncGoogleAccounts,
   type DashboardPayload,
   type GoogleSyncResponse,
+  type Profile,
   type ProfilePerformanceItem,
   type ReportOverview,
+  type ReviewListResponse,
   type TrendPoint,
 } from "../lib/api";
+
+const REVIEW_PAGE_SIZE = 5;
 
 function TrendGraph({ trend }: { trend: TrendPoint[] }) {
   const safeTrend = trend.length
@@ -177,10 +183,16 @@ export function DashboardPage() {
   const isMasterAdmin = memberships[0]?.role === "master_admin";
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [overview, setOverview] = useState<ReportOverview | null>(null);
+  const [branchProfiles, setBranchProfiles] = useState<Profile[]>([]);
+  const [reviewFeed, setReviewFeed] = useState<ReviewListResponse | null>(null);
+  const [reviewPage, setReviewPage] = useState(1);
+  const [reviewSentiment, setReviewSentiment] = useState<"all" | "positive" | "negative">("all");
+  const [reviewBranchId, setReviewBranchId] = useState("all");
   const [error, setError] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<GoogleSyncResponse | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [syncToasts, setSyncToasts] = useState<string[]>([]);
 
   async function loadDashboard() {
     if (!accessToken) return;
@@ -203,6 +215,31 @@ export function DashboardPage() {
     }
   }
 
+  async function loadBranchProfiles() {
+    if (!accessToken) return;
+    try {
+      const payload = await fetchProfiles(accessToken);
+      setBranchProfiles(payload.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load branches");
+    }
+  }
+
+  async function loadReviewFeed() {
+    if (!accessToken) return;
+    try {
+      const payload = await fetchReviews(accessToken, {
+        sentiment: reviewSentiment === "all" ? undefined : reviewSentiment,
+        profileId: reviewBranchId === "all" ? undefined : reviewBranchId,
+        page: reviewPage,
+        pageSize: REVIEW_PAGE_SIZE,
+      });
+      setReviewFeed(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load reviews");
+    }
+  }
+
   useEffect(() => {
     void loadDashboard();
   }, [accessToken]);
@@ -210,6 +247,14 @@ export function DashboardPage() {
   useEffect(() => {
     void loadOverview();
   }, [accessToken]);
+
+  useEffect(() => {
+    void loadBranchProfiles();
+  }, [accessToken]);
+
+  useEffect(() => {
+    void loadReviewFeed();
+  }, [accessToken, reviewPage, reviewSentiment, reviewBranchId]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -245,8 +290,12 @@ export function DashboardPage() {
       const result = await syncGoogleAccounts(accessToken);
       setSyncResult(result);
       setActionMessage(result.message);
+      if (result.errors.length) {
+        setSyncToasts(result.errors);
+      }
       await loadDashboard();
       await loadOverview();
+      await loadReviewFeed();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google sync failed");
     } finally {
@@ -254,7 +303,37 @@ export function DashboardPage() {
     }
   }
 
+  useEffect(() => {
+    if (!syncToasts.length) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSyncToasts([]);
+    }, 7000);
+
+    return () => window.clearTimeout(timer);
+  }, [syncToasts]);
+
   const reviewPulse = overview?.trend ?? [];
+  const activeReviewPage = reviewFeed?.page ?? reviewPage;
+  const activeReviewPageSize = reviewFeed?.page_size ?? REVIEW_PAGE_SIZE;
+  const reviewRangeStart = reviewFeed?.total
+    ? (activeReviewPage - 1) * activeReviewPageSize + 1
+    : 0;
+  const reviewRangeEnd = reviewFeed?.total
+    ? Math.min(activeReviewPage * activeReviewPageSize, reviewFeed.total)
+    : 0;
+
+  function handleReviewSentimentChange(next: "all" | "positive" | "negative") {
+    setReviewPage(1);
+    setReviewSentiment(next);
+  }
+
+  function handleReviewBranchChange(next: string) {
+    setReviewPage(1);
+    setReviewBranchId(next);
+  }
 
   if (!dashboard) {
     return <p className="text-ink/60">{error ?? "Loading dashboard..."}</p>;
@@ -262,6 +341,29 @@ export function DashboardPage() {
 
   return (
     <section className="space-y-8">
+      {syncToasts.length ? (
+        <div className="fixed right-4 top-4 z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col gap-3">
+          {syncToasts.map((message, index) => (
+            <div
+              key={`${message}-${index}`}
+              className="max-w-full overflow-hidden rounded-3xl border border-rust/25 bg-rust/10 px-5 py-4 text-sm leading-6 text-rust shadow-xl backdrop-blur-sm"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <p className="min-w-0 flex-1 break-all whitespace-pre-wrap">{message}</p>
+                <button
+                  type="button"
+                  aria-label="Dismiss notification"
+                  onClick={() => setSyncToasts((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                  className="text-xs uppercase tracking-[0.2em] text-rust/70 transition hover:text-rust"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {error ? (
         <div className="rounded-3xl border border-rust/20 bg-rust/10 px-5 py-4 text-sm text-rust">
           {error}
@@ -326,23 +428,23 @@ export function DashboardPage() {
         </Panel>
       ) : null}
 
-      {isMasterAdmin ? (
-        <Panel eyebrow="Google Integration" title="Connect accounts and sync from the homepage">
+      <Panel eyebrow="Google Integration" title="Connect accounts and sync from the homepage">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="max-w-2xl text-sm leading-7 text-ink/70">
-              Connect Google Business Profile here, then run a sync to import locations,
-              fetch reviews, and post automated replies. Positive replies use Gemini when
-              `GEMINI_API_KEY` is configured; otherwise the backend falls back to a basic
-              thank-you response.
+              {isMasterAdmin
+                ? "Connect Google Business Profile here, then run a sync to import locations, fetch reviews, and post automated replies. Positive replies use Gemini when `GEMINI_API_KEY` is configured; otherwise the backend falls back to a basic thank-you response."
+                : "Run a sync to refresh the branches assigned to you. Reviews and replies for those locations will update from Google during sync."}
             </div>
             <div className="flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={handleConnectGoogle}
-                className="rounded-full bg-pine px-5 py-3 text-sm uppercase tracking-[0.2em] text-sand"
-              >
-                Connect Google
-              </button>
+              {isMasterAdmin ? (
+                <button
+                  type="button"
+                  onClick={handleConnectGoogle}
+                  className="rounded-full bg-pine px-5 py-3 text-sm uppercase tracking-[0.2em] text-sand"
+                >
+                  Connect Google
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={handleSync}
@@ -368,15 +470,9 @@ export function DashboardPage() {
               <MetricCard label="Reviews" value={String(syncResult.synced_reviews)} tone="gold" />
               <MetricCard label="Replies" value={String(syncResult.replies_posted)} />
             </div>
-            {syncResult.errors.length ? (
-              <div className="rounded-3xl border border-rust/20 bg-rust/10 px-5 py-4 text-sm text-rust">
-                {syncResult.errors.join(" | ")}
-              </div>
-            ) : null}
           </div>
         ) : null}
       </Panel>
-      ) : null}
 
       <div className="grid gap-8 xl:grid-cols-[1.1fr_0.9fr]">
         <Panel eyebrow="Profiles" title="Network visibility by branch">
@@ -403,27 +499,111 @@ export function DashboardPage() {
         </Panel>
 
         <Panel eyebrow="Reviews" title="Most recent customer signals">
-          <div className="space-y-4">
-            {dashboard.reviews.map((review) => (
-              <article key={review.id} className="rounded-3xl border border-ink/10 bg-white/70 p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <h3 className="font-semibold">{review.business_name}</h3>
-                  <span className="text-sm uppercase tracking-[0.2em] text-rust">
-                    {review.sentiment}
-                  </span>
-                </div>
-                <p className="mt-2 text-sm text-ink/55">
-                  {review.reviewer_name ?? "Anonymous"} · {review.star_rating} stars
-                </p>
-                <p className="mt-3 text-sm leading-7 text-ink/75">{review.review_text}</p>
-                {review.reply_text ? (
-                  <p className="mt-3 rounded-2xl bg-pine/8 px-4 py-3 text-sm text-pine">
-                    Reply: {review.reply_text}
-                  </p>
-                ) : null}
-              </article>
-            ))}
+          <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div className="flex flex-nowrap gap-2 overflow-x-auto pb-1">
+              {[
+                { key: "all", label: "All" },
+                { key: "positive", label: "Positive" },
+                { key: "negative", label: "Negative" },
+              ].map((option) => {
+                const active = reviewSentiment === option.key;
+                return (
+                  <button
+                    key={option.key}
+                    type="button"
+                    onClick={() => handleReviewSentimentChange(option.key as "all" | "positive" | "negative")}
+                    className={[
+                      "shrink-0 rounded-full border px-4 py-2 text-sm transition",
+                      active
+                        ? "border-pine bg-pine text-sand shadow-sm"
+                        : "border-ink/15 bg-white/70 text-ink hover:border-pine/40 hover:bg-pine/10",
+                    ].join(" ")}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+            <label className="flex flex-col gap-2 text-sm text-ink/65 lg:min-w-72">
+              <span className="text-xs uppercase tracking-[0.2em] text-ink/45">Branch</span>
+              <select
+                value={reviewBranchId}
+                onChange={(event) => handleReviewBranchChange(event.target.value)}
+                className="rounded-2xl border border-ink/15 bg-white/80 px-4 py-3 text-sm text-ink outline-none transition focus:border-pine"
+              >
+                <option value="all">All branches</option>
+                {branchProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.business_name}
+                    {profile.city ? ` · ${profile.city}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+
+          {reviewFeed ? (
+            <>
+              {reviewFeed.items.length ? (
+                <div className="space-y-4">
+                  {reviewFeed.items.map((review) => (
+                    <article key={review.id} className="rounded-3xl border border-ink/10 bg-white/70 p-5">
+                      <div className="flex items-center justify-between gap-4">
+                        <h3 className="font-semibold">{review.business_name}</h3>
+                        <span className="text-sm uppercase tracking-[0.2em] text-rust">
+                          {review.sentiment}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm text-ink/55">
+                        {review.reviewer_name ?? "Anonymous"} · {review.star_rating} stars
+                      </p>
+                      <p className="mt-3 text-sm leading-7 text-ink/75">{review.review_text}</p>
+                      {review.reply_text ? (
+                        <p className="mt-3 rounded-2xl bg-pine/8 px-4 py-3 text-sm text-pine">
+                          Reply: {review.reply_text}
+                        </p>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-3xl border border-dashed border-ink/15 bg-sand/35 p-6 text-sm text-ink/60">
+                  No reviews match the current filters.
+                </div>
+              )}
+
+              <div className="mt-6 flex flex-col gap-3 border-t border-ink/10 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-ink/55">
+                  {reviewFeed.total
+                    ? `Showing ${reviewRangeStart}-${reviewRangeEnd} of ${reviewFeed.total} reviews`
+                    : "No reviews available for the selected filters"}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setReviewPage((current) => Math.max(1, current - 1))}
+                    disabled={reviewFeed.page <= 1}
+                    className="rounded-full border border-ink/15 bg-white px-4 py-2 text-sm uppercase tracking-[0.2em] text-ink transition hover:border-pine hover:bg-pine/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Prev
+                  </button>
+                  <span className="rounded-full border border-ink/10 bg-sand/45 px-4 py-2 text-xs uppercase tracking-[0.2em] text-ink/60">
+                    Page {reviewFeed.page} of {reviewFeed.total_pages || 1}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setReviewPage((current) => current + 1)}
+                    disabled={reviewFeed.total_pages === 0 || reviewFeed.page >= reviewFeed.total_pages}
+                    className="rounded-full border border-ink/15 bg-white px-4 py-2 text-sm uppercase tracking-[0.2em] text-ink transition hover:border-pine hover:bg-pine/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-ink/60">Loading reviews...</p>
+          )}
         </Panel>
       </div>
     </section>

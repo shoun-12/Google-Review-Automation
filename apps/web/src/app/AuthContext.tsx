@@ -7,7 +7,14 @@ import {
   type ReactNode,
 } from "react";
 
-import { fetchMe, login as loginRequest, type AuthResponse, type AuthUser, type Membership } from "../lib/api";
+import { fetchMe, login as loginRequest, type AuthUser, type Membership } from "../lib/api";
+import {
+  clearStoredSession,
+  getStoredSession,
+  saveStoredSession,
+  subscribeSession,
+  type PersistedSession,
+} from "../lib/session";
 
 type SessionState = {
   user: AuthUser | null;
@@ -18,51 +25,64 @@ type SessionState = {
   logout: () => void;
 };
 
-const STORAGE_KEY = "gra_session";
-
 const AuthContext = createContext<SessionState | undefined>(undefined);
 
-type PersistedSession = {
-  accessToken: string;
-  refreshToken: string;
-  user: AuthUser;
-  memberships: Membership[];
-};
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [memberships, setMemberships] = useState<Membership[]>([]);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(() => getStoredSession()?.user ?? null);
+  const [memberships, setMemberships] = useState<Membership[]>(() => getStoredSession()?.memberships ?? []);
+  const [accessToken, setAccessToken] = useState<string | null>(() => getStoredSession()?.accessToken ?? null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
+    const unsubscribe = subscribeSession((session) => {
+      setAccessToken(session?.accessToken ?? null);
+      setUser(session?.user ?? null);
+      setMemberships(session?.memberships ?? []);
+      setLoading(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const session = getStoredSession();
+    if (!session) {
       setLoading(false);
       return;
     }
 
-    const session = JSON.parse(raw) as PersistedSession;
-    setAccessToken(session.accessToken);
-    setUser(session.user);
-    setMemberships(session.memberships);
-
+    let cancelled = false;
     fetchMe(session.accessToken)
       .then((result) => {
-        setUser(result.user);
-        setMemberships(result.memberships);
+        if (cancelled) {
+          return;
+        }
+        const nextSession: PersistedSession = {
+          ...session,
+          user: result.user,
+          memberships: result.memberships,
+        };
+        saveStoredSession(nextSession);
       })
       .catch(() => {
-        localStorage.removeItem(STORAGE_KEY);
-        setAccessToken(null);
-        setUser(null);
-        setMemberships([]);
+        if (cancelled) {
+          return;
+        }
+        clearStoredSession();
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function login(email: string, password: string) {
-    const response: AuthResponse = await loginRequest({ email, password });
+    const response = await loginRequest({ email, password });
     const persisted: PersistedSession = {
       accessToken: response.access_token,
       refreshToken: response.refresh_token,
@@ -70,17 +90,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       memberships: response.memberships,
     };
 
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
-    setAccessToken(response.access_token);
-    setUser(response.user);
-    setMemberships(response.memberships);
+    saveStoredSession(persisted);
   }
 
   function logout() {
-    localStorage.removeItem(STORAGE_KEY);
-    setAccessToken(null);
-    setUser(null);
-    setMemberships([]);
+    clearStoredSession();
   }
 
   const value = useMemo(

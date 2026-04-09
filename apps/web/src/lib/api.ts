@@ -29,6 +29,13 @@ export type AuthResponse = {
   memberships: Membership[];
 };
 
+export type RefreshTokenResponse = {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+};
+
 export type SummaryReport = {
   total_connected_profiles: number;
   reviews_received: number;
@@ -90,6 +97,14 @@ export type Review = {
   reply_text: string | null;
 };
 
+export type ReviewListResponse = {
+  items: Review[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+};
+
 export type UserListItem = {
   id: string;
   email: string;
@@ -114,6 +129,7 @@ export type UserCreatePayload = {
 };
 
 export type UserUpdatePayload = {
+  email?: string;
   full_name?: string;
   phone_number?: string;
   role?: string;
@@ -188,6 +204,10 @@ export type GoogleOAuthStartResponse = {
   authorization_url: string;
 };
 
+export type GoogleLoginStartResponse = {
+  authorization_url: string;
+};
+
 export type GoogleSyncResponse = {
   message: string;
   connected_accounts: number;
@@ -219,6 +239,84 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function refreshStoredSession(): Promise<string | null> {
+  const { getStoredRefreshToken, updateStoredSessionTokens, clearStoredSession } = await import("./session");
+  const refreshToken = getStoredRefreshToken();
+  if (!refreshToken) {
+    return null;
+  }
+
+  try {
+    const response = await request<RefreshTokenResponse>("/auth/refresh", {
+      method: "POST",
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    updateStoredSessionTokens(response.access_token, response.refresh_token);
+    return response.access_token;
+  } catch {
+    clearStoredSession();
+    return null;
+  }
+}
+
+async function fetchWithAuthResponse(path: string, token: string, options: RequestInit = {}): Promise<Response> {
+  const { headers, ...restOptions } = options;
+  const authHeaders = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+    ...(headers ?? {}),
+  };
+
+  let response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: authHeaders,
+    ...restOptions,
+  });
+
+  if (response.status === 401) {
+    const refreshedToken = await refreshStoredSession();
+    if (!refreshedToken) {
+      const { clearStoredSession } = await import("./session");
+      clearStoredSession();
+      if (typeof window !== "undefined") {
+        window.location.assign("/login");
+      }
+      return response;
+    }
+
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: {
+        ...authHeaders,
+        Authorization: `Bearer ${refreshedToken}`,
+      },
+      ...restOptions,
+    });
+
+    if (response.status === 401) {
+      const { clearStoredSession } = await import("./session");
+      clearStoredSession();
+      if (typeof window !== "undefined") {
+        window.location.assign("/login");
+      }
+    }
+  }
+
+  return response;
+}
+
+async function requestWithAuth<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetchWithAuthResponse(path, token, options);
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Request failed with status ${response.status}`);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
+}
+
 export async function login(payload: LoginPayload): Promise<AuthResponse> {
   return request<AuthResponse>("/auth/login", {
     method: "POST",
@@ -227,27 +325,19 @@ export async function login(payload: LoginPayload): Promise<AuthResponse> {
 }
 
 export async function fetchMe(token: string) {
-  return request<{ user: AuthUser; memberships: Membership[]; last_login_at: string | null }>("/auth/me", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<{ user: AuthUser; memberships: Membership[]; last_login_at: string | null }>("/auth/me", token);
 }
 
 export async function fetchDashboard(token: string): Promise<DashboardPayload> {
-  return request<DashboardPayload>("/dashboard", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<DashboardPayload>("/dashboard", token);
 }
 
 export async function fetchReportOverview(token: string, days: number): Promise<ReportOverview> {
-  return request<ReportOverview>(`/reports/overview?days=${days}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<ReportOverview>(`/reports/overview?days=${days}`, token);
 }
 
 export async function downloadProfilesCsv(token: string, days: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/reports/profiles.csv?days=${days}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await fetchWithAuthResponse(`/reports/profiles.csv?days=${days}`, token);
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || `Request failed with status ${response.status}`);
@@ -256,33 +346,48 @@ export async function downloadProfilesCsv(token: string, days: number): Promise<
 }
 
 export async function fetchProfiles(token: string): Promise<{ items: Profile[] }> {
-  return request<{ items: Profile[] }>("/profiles", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<{ items: Profile[] }>("/profiles", token);
 }
 
 export async function fetchAuditLogs(token: string): Promise<{ items: AuditLogItem[] }> {
-  return request<{ items: AuditLogItem[] }>("/audit-logs", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<{ items: AuditLogItem[] }>("/audit-logs", token);
 }
 
-export async function fetchReviews(token: string): Promise<{ items: Review[] }> {
-  return request<{ items: Review[] }>("/reviews", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+export type ReviewFeedQuery = {
+  sentiment?: "positive" | "negative";
+  profileId?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+export async function fetchReviews(
+  token: string,
+  query: ReviewFeedQuery = {},
+): Promise<ReviewListResponse> {
+  const params = new URLSearchParams();
+  if (query.sentiment) {
+    params.set("sentiment", query.sentiment);
+  }
+  if (query.profileId) {
+    params.set("profile_id", query.profileId);
+  }
+  if (typeof query.page === "number") {
+    params.set("page", String(query.page));
+  }
+  if (typeof query.pageSize === "number") {
+    params.set("page_size", String(query.pageSize));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestWithAuth<ReviewListResponse>(`/reviews${suffix}`, token);
 }
 
 export async function fetchUsers(token: string): Promise<{ items: UserListItem[] }> {
-  return request<{ items: UserListItem[] }>("/users", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<{ items: UserListItem[] }>("/users", token);
 }
 
 export async function createUser(token: string, payload: UserCreatePayload): Promise<UserListItem> {
-  return request<UserListItem>("/users", {
+  return requestWithAuth<UserListItem>("/users", token, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
 }
@@ -292,26 +397,22 @@ export async function updateUser(
   userId: string,
   payload: UserUpdatePayload,
 ): Promise<UserListItem> {
-  return request<UserListItem>(`/users/${userId}`, {
+  return requestWithAuth<UserListItem>(`/users/${userId}`, token, {
     method: "PATCH",
-    headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
 }
 
 export async function fetchTemplates(token: string): Promise<{ items: ReplyTemplate[] }> {
-  return request<{ items: ReplyTemplate[] }>("/reply-templates", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<{ items: ReplyTemplate[] }>("/reply-templates", token);
 }
 
 export async function createTemplate(
   token: string,
   payload: ReplyTemplateUpsertPayload,
 ): Promise<ReplyTemplate> {
-  return request<ReplyTemplate>("/reply-templates", {
+  return requestWithAuth<ReplyTemplate>("/reply-templates", token, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
 }
@@ -321,17 +422,14 @@ export async function updateTemplate(
   templateId: string,
   payload: ReplyTemplateUpsertPayload,
 ): Promise<ReplyTemplate> {
-  return request<ReplyTemplate>(`/reply-templates/${templateId}`, {
+  return requestWithAuth<ReplyTemplate>(`/reply-templates/${templateId}`, token, {
     method: "PATCH",
-    headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
 }
 
 export async function fetchGoogleAccounts(token: string): Promise<{ items: GoogleAccount[] }> {
-  return request<{ items: GoogleAccount[] }>("/google", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  return requestWithAuth<{ items: GoogleAccount[] }>("/google", token);
 }
 
 export async function updateProfile(
@@ -339,23 +437,26 @@ export async function updateProfile(
   profileId: string,
   payload: ProfileUpdatePayload,
 ): Promise<Profile> {
-  return request<Profile>(`/profiles/${profileId}`, {
+  return requestWithAuth<Profile>(`/profiles/${profileId}`, token, {
     method: "PATCH",
-    headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
 }
 
-export async function startGoogleOAuth(token: string): Promise<GoogleOAuthStartResponse> {
-  return request<GoogleOAuthStartResponse>("/google/oauth/start", {
+export async function startDashboardGoogleLogin(): Promise<GoogleLoginStartResponse> {
+  return request<GoogleLoginStartResponse>("/auth/google/start", {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function startGoogleOAuth(token: string): Promise<GoogleOAuthStartResponse> {
+  return requestWithAuth<GoogleOAuthStartResponse>("/google/oauth/start", token, {
+    method: "POST",
   });
 }
 
 export async function syncGoogleAccounts(token: string): Promise<GoogleSyncResponse> {
-  return request<GoogleSyncResponse>("/google/sync", {
+  return requestWithAuth<GoogleSyncResponse>("/google/sync", token, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
   });
 }

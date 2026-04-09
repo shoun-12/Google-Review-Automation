@@ -115,6 +115,11 @@ def update_user(
     if user_membership is None:
         raise HTTPException(status_code=404, detail="Membership not found")
 
+    if payload.email is not None:
+        existing_user = db.scalar(select(User).where(User.email == payload.email, User.id != user.id))
+        if existing_user is not None:
+            raise HTTPException(status_code=400, detail="User with this email already exists")
+        user.email = payload.email
     if payload.full_name is not None:
         user.full_name = payload.full_name
     if payload.phone_number is not None:
@@ -140,6 +145,7 @@ def update_user(
         target_type="user",
         target_id=str(user.id),
         metadata={
+            "email": user.email,
             "role": user_membership.role.value,
             "is_active": user.is_active,
             "email_alerts_enabled": user_membership.email_alerts_enabled,

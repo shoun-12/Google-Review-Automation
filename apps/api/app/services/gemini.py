@@ -23,10 +23,14 @@ def build_positive_reply_prompt(review_text: str | None, reviewer_name: str | No
     )
 
 
+def build_fallback_positive_reply(reviewer_name: str | None) -> str:
+    name = reviewer_name or "there"
+    return f"Thank you, {name}, for your positive feedback. We appreciate your support and look forward to serving you again."
+
+
 async def generate_positive_reply(review_text: str | None, reviewer_name: str | None, business_name: str) -> str:
     if not settings.gemini_api_key:
-        name = reviewer_name or "there"
-        return f"Thank you, {name}, for your positive feedback. We appreciate your support and look forward to serving you again."
+        return build_fallback_positive_reply(reviewer_name)
 
     payload = {
         "contents": [
@@ -41,15 +45,18 @@ async def generate_positive_reply(review_text: str | None, reviewer_name: str | 
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            GEMINI_URL.format(model=settings.gemini_model),
-            params={"key": settings.gemini_api_key},
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = await client.post(
+                GEMINI_URL.format(model=settings.gemini_model),
+                params={"key": settings.gemini_api_key},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPStatusError, httpx.RequestError, ValueError, KeyError, IndexError, TypeError):
+            return build_fallback_positive_reply(reviewer_name)
 
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Gemini response did not include reply text") from exc
+        return build_fallback_positive_reply(reviewer_name)

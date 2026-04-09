@@ -9,20 +9,25 @@ from uuid import uuid4
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy import and_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.tokens import decrypt_secret
 from app.core.tokens import encrypt_secret
+from app.models.entities import GBPProfile
 from app.models.entities import GoogleAccount
 from app.models.entities import Membership
 from app.models.entities import OAuthState
+from app.models.entities import ProfileAssignment
 from app.models.entities import Reply
 from app.models.entities import ReplyTemplate
 from app.models.entities import ReplyTypeEnum
 from app.models.entities import Review
 from app.models.entities import ReviewSentimentEnum
 from app.models.entities import ReviewStatusEnum
+from app.models.entities import RoleEnum
 from app.services.gemini import generate_positive_reply
 
 
@@ -293,7 +298,55 @@ def _derive_sentiment(star_rating: int) -> ReviewSentimentEnum:
     return ReviewSentimentEnum.POSITIVE if star_rating >= 4 else ReviewSentimentEnum.NEGATIVE
 
 
-async def sync_google_account(db: Session, google_account: GoogleAccount) -> SyncResult:
+def _accessible_location_ids(
+    db: Session,
+    tenant_id,
+    user_id,
+    role,
+) -> set[str] | None:
+    if role != RoleEnum.LOCAL_ADMIN or user_id is None:
+        return None
+
+    rows = db.scalars(
+        select(GBPProfile.gbp_location_id)
+        .outerjoin(
+            ProfileAssignment,
+            ProfileAssignment.gbp_profile_id == GBPProfile.id,
+        )
+        .where(
+            GBPProfile.tenant_id == tenant_id,
+            GBPProfile.deleted_at.is_(None),
+            or_(
+                GBPProfile.primary_local_admin_user_id == user_id,
+                and_(
+                    ProfileAssignment.user_id == user_id,
+                    ProfileAssignment.is_active.is_(True),
+                    ProfileAssignment.tenant_id == tenant_id,
+                ),
+            ),
+        )
+        .distinct()
+    ).all()
+    return set(rows)
+
+
+def _extract_google_reply(item: dict) -> tuple[str | None, datetime | None]:
+    reply_payload = item.get("reviewReply") or item.get("reply") or item.get("review_reply")
+    if not isinstance(reply_payload, dict):
+        return None, None
+    reply_text = reply_payload.get("comment") or reply_payload.get("text") or reply_payload.get("replyText")
+    if not reply_text:
+        return None, None
+    posted_at_value = reply_payload.get("updateTime") or reply_payload.get("createTime")
+    return reply_text, _parse_google_timestamp(posted_at_value) if posted_at_value else None
+
+
+async def sync_google_account(
+    db: Session,
+    google_account: GoogleAccount,
+    user_id=None,
+    role=None,
+) -> SyncResult:
     if not google_account.encrypted_refresh_token or google_account.encrypted_refresh_token == "encrypted-placeholder-token":
         raise ValueError("Google account is a local placeholder and must be replaced by a real OAuth connection")
     print(f"Syncing Google account {google_account.email} (ID: {google_account.id})", flush=True)
@@ -318,130 +371,182 @@ async def sync_google_account(db: Session, google_account: GoogleAccount) -> Syn
     result = SyncResult(connected_accounts=1)
     locations = await fetch_locations(access_token, google_account.google_account_id)
     print("LOCATIONS RESPONSE:", locations, flush=True)
-    result.synced_locations += len(locations)
+    accessible_location_ids = _accessible_location_ids(db, google_account.tenant_id, user_id, role)
 
     from app.models.entities import BrandEnum
     from app.models.entities import GBPProfile
 
     for location in locations:
         print("LOCATION ITEM:", location, flush=True)
-        gbp_location_id = location["name"].split("/")[-1]
-        profile = db.scalar(select(GBPProfile).where(GBPProfile.gbp_location_id == gbp_location_id))
-        if profile is None:
-            profile = GBPProfile(
-                tenant_id=google_account.tenant_id,
-                google_account_id=google_account.id,
-                gbp_location_id=gbp_location_id,
-                business_name=location.get("title") or gbp_location_id,
-                store_code=location.get("storeCode"),
-                city=_extract_city(location),
-                state=_extract_state(location),
-                brand=BrandEnum(_derive_brand(location)),
-                is_active=True,
-                auto_respond_enabled=True,
-            )
-            db.add(profile)
-            db.flush()
-        else:
-            profile.business_name = location.get("title") or profile.business_name
-            profile.store_code = location.get("storeCode")
-            profile.city = _extract_city(location)
-            profile.state = _extract_state(location)
-            profile.last_synced_at = datetime.now(UTC)
+        try:
+            gbp_location_id = location["name"].split("/")[-1]
+            if accessible_location_ids is not None and gbp_location_id not in accessible_location_ids:
+                continue
+            profile = db.scalar(select(GBPProfile).where(GBPProfile.gbp_location_id == gbp_location_id))
+            if profile is None:
+                profile = GBPProfile(
+                    tenant_id=google_account.tenant_id,
+                    google_account_id=google_account.id,
+                    gbp_location_id=gbp_location_id,
+                    business_name=location.get("title") or gbp_location_id,
+                    store_code=location.get("storeCode"),
+                    city=_extract_city(location),
+                    state=_extract_state(location),
+                    brand=BrandEnum(_derive_brand(location)),
+                    is_active=True,
+                    auto_respond_enabled=True,
+                )
+                db.add(profile)
+                db.flush()
+            else:
+                profile.business_name = location.get("title") or profile.business_name
+                profile.store_code = location.get("storeCode")
+                profile.city = _extract_city(location)
+                profile.state = _extract_state(location)
+                profile.last_synced_at = datetime.now(UTC)
 
-        review_parent = f"{google_account.google_account_id}/{location['name']}"
-        reviews_payload = await fetch_reviews(access_token, review_parent)
-        print("REVIEWS PAYLOAD:", reviews_payload, flush=True)
-        review_items = reviews_payload.get("reviews", [])
-        payload_ratings = [_extract_rating_value(item.get("starRating")) for item in review_items]
-        payload_ratings = [value for value in payload_ratings if value]
-        profile.avg_rating_cached = (
-            sum(payload_ratings) / len(payload_ratings) if payload_ratings else reviews_payload.get("averageRating") or 0
-        )
-        profile.total_reviews_cached = reviews_payload.get("totalReviewCount") or len(review_items)
-        profile.last_synced_at = datetime.now(UTC)
+            db.commit()
+            result.synced_locations += 1
 
-        for item in review_items:
-            print("REVIEW ITEM:", item, flush=True)
-            review_name = item["reviewId"] if "reviewId" in item else item["name"].split("/")[-1]
-            star_rating = _extract_rating_value(item.get("starRating"))
-            if not star_rating:
+            review_parent = f"{google_account.google_account_id}/{location['name']}"
+            try:
+                reviews_payload = await fetch_reviews(access_token, review_parent)
+            except Exception as exc:
+                db.rollback()
+                result.errors.append(
+                    f"{google_account.email} / {profile.business_name}: reviews sync failed ({_format_sync_error(exc)})"
+                )
                 continue
 
-            review = db.scalar(select(Review).where(Review.gbp_review_id == review_name))
-            if review is None:
-                review = Review(
-                    tenant_id=google_account.tenant_id,
-                    gbp_profile_id=profile.id,
-                    gbp_review_id=review_name,
-                    reviewer_name=(item.get("reviewer") or {}).get("displayName"),
-                    star_rating=star_rating,
-                    review_text=item.get("comment"),
-                    sentiment=_derive_sentiment(star_rating),
-                    status=ReviewStatusEnum.PENDING,
-                    review_posted_at=_parse_google_timestamp(item.get("createTime")),
-                    last_synced_at=datetime.now(UTC),
-                    raw_payload_json=item,
-                )
-                db.add(review)
-                db.flush()
-                result.synced_reviews += 1
-            else:
-                review.reviewer_name = (item.get("reviewer") or {}).get("displayName")
-                review.star_rating = star_rating
-                review.review_text = item.get("comment")
-                review.sentiment = _derive_sentiment(star_rating)
-                review.review_posted_at = _parse_google_timestamp(item.get("createTime"))
-                review.last_synced_at = datetime.now(UTC)
-                review.raw_payload_json = item
+            print("REVIEWS PAYLOAD:", reviews_payload, flush=True)
+            review_items = reviews_payload.get("reviews", [])
+            payload_ratings = [_extract_rating_value(item.get("starRating")) for item in review_items]
+            payload_ratings = [value for value in payload_ratings if value]
+            profile.avg_rating_cached = (
+                sum(payload_ratings) / len(payload_ratings) if payload_ratings else reviews_payload.get("averageRating") or 0
+            )
+            profile.total_reviews_cached = reviews_payload.get("totalReviewCount") or len(review_items)
+            profile.last_synced_at = datetime.now(UTC)
 
-            if review.status == ReviewStatusEnum.PENDING and profile.auto_respond_enabled:
-                reply = db.scalar(select(Reply).where(Reply.review_id == review.id))
-                if reply is None:
-                    if review.sentiment == ReviewSentimentEnum.POSITIVE:
-                        reply_text = await generate_positive_reply(
-                            review.review_text,
-                            review.reviewer_name,
-                            profile.business_name,
-                        )
-                        reply_type = ReplyTypeEnum.AI_GENERATED
-                    else:
-                        template = db.scalar(
-                            select(ReplyTemplate).where(
-                                ReplyTemplate.tenant_id == google_account.tenant_id,
-                                ReplyTemplate.brand == profile.brand,
-                                ReplyTemplate.sentiment == ReviewSentimentEnum.NEGATIVE,
-                                ReplyTemplate.is_active.is_(True),
-                            )
-                        )
-                        if template is None:
-                            reply_text = (
-                                "We are sorry about your experience. Our team will review your feedback and reach out."
-                            )
-                        else:
-                            reply_text = template.template_text
-                        reply_type = ReplyTypeEnum.TEMPLATED
+            for item in review_items:
+                print("REVIEW ITEM:", item, flush=True)
+                review_name = item["reviewId"] if "reviewId" in item else item["name"].split("/")[-1]
+                star_rating = _extract_rating_value(item.get("starRating"))
+                if not star_rating:
+                    continue
+                google_reply_text, google_reply_posted_at = _extract_google_reply(item)
 
-                    await post_review_reply(access_token, item["name"], reply_text)
-                    db.add(
-                        Reply(
-                            review_id=review.id,
-                            reply_text=reply_text,
-                            reply_type=reply_type,
-                            generation_model=settings.gemini_model if reply_type == ReplyTypeEnum.AI_GENERATED else None,
-                            posted_to_google=True,
-                            posted_at=datetime.now(UTC),
-                        )
+                review = db.scalar(select(Review).where(Review.gbp_review_id == review_name))
+                if review is None:
+                    review = Review(
+                        tenant_id=google_account.tenant_id,
+                        gbp_profile_id=profile.id,
+                        gbp_review_id=review_name,
+                        reviewer_name=(item.get("reviewer") or {}).get("displayName"),
+                        star_rating=star_rating,
+                        review_text=item.get("comment"),
+                        sentiment=_derive_sentiment(star_rating),
+                        status=ReviewStatusEnum.PENDING,
+                        review_posted_at=_parse_google_timestamp(item.get("createTime")),
+                        last_synced_at=datetime.now(UTC),
+                        raw_payload_json=item,
                     )
-                    review.status = ReviewStatusEnum.REPLIED
-                    review.status_changed_at = datetime.now(UTC)
-                    result.replies_posted += 1
+                    db.add(review)
+                    db.flush()
+                    result.synced_reviews += 1
+                else:
+                    review.reviewer_name = (item.get("reviewer") or {}).get("displayName")
+                    review.star_rating = star_rating
+                    review.review_text = item.get("comment")
+                    review.sentiment = _derive_sentiment(star_rating)
+                    review.review_posted_at = _parse_google_timestamp(item.get("createTime"))
+                    review.last_synced_at = datetime.now(UTC)
+                    review.raw_payload_json = item
 
-    db.commit()
+                if google_reply_text:
+                    reply = db.scalar(select(Reply).where(Reply.review_id == review.id))
+                    if reply is None:
+                        db.add(
+                            Reply(
+                                review_id=review.id,
+                                reply_text=google_reply_text,
+                                reply_type=ReplyTypeEnum.MANUAL,
+                                generation_model=None,
+                                posted_to_google=True,
+                                posted_at=google_reply_posted_at or datetime.now(UTC),
+                            )
+                        )
+                        result.replies_posted += 1
+                    else:
+                        reply.reply_text = google_reply_text
+                        reply.reply_type = ReplyTypeEnum.MANUAL
+                        reply.generation_model = None
+                        reply.posted_to_google = True
+                        reply.posted_at = google_reply_posted_at or reply.posted_at or datetime.now(UTC)
+                if google_reply_text and review.status != ReviewStatusEnum.REPLIED:
+                    review.status = ReviewStatusEnum.REPLIED
+                    review.status_changed_at = google_reply_posted_at or datetime.now(UTC)
+                elif not google_reply_text:
+                    existing_reply = db.scalar(select(Reply).where(Reply.review_id == review.id))
+                    if existing_reply is not None:
+                        db.delete(existing_reply)
+                        if review.status == ReviewStatusEnum.REPLIED:
+                            review.status = ReviewStatusEnum.PENDING
+                            review.status_changed_at = datetime.now(UTC)
+
+                if review.status == ReviewStatusEnum.PENDING and profile.auto_respond_enabled:
+                    reply = db.scalar(select(Reply).where(Reply.review_id == review.id))
+                    if reply is None:
+                        if review.sentiment == ReviewSentimentEnum.POSITIVE:
+                            reply_text = await generate_positive_reply(
+                                review.review_text,
+                                review.reviewer_name,
+                                profile.business_name,
+                            )
+                            reply_type = ReplyTypeEnum.AI_GENERATED
+                        else:
+                            template = db.scalar(
+                                select(ReplyTemplate).where(
+                                    ReplyTemplate.tenant_id == google_account.tenant_id,
+                                    ReplyTemplate.brand == profile.brand,
+                                    ReplyTemplate.sentiment == ReviewSentimentEnum.NEGATIVE,
+                                    ReplyTemplate.is_active.is_(True),
+                                )
+                            )
+                            if template is None:
+                                reply_text = (
+                                    "We are sorry about your experience. Our team will review your feedback and reach out."
+                                )
+                            else:
+                                reply_text = template.template_text
+                            reply_type = ReplyTypeEnum.TEMPLATED
+
+                        await post_review_reply(access_token, item["name"], reply_text)
+                        db.add(
+                            Reply(
+                                review_id=review.id,
+                                reply_text=reply_text,
+                                reply_type=reply_type,
+                                generation_model=settings.gemini_model if reply_type == ReplyTypeEnum.AI_GENERATED else None,
+                                posted_to_google=True,
+                                posted_at=datetime.now(UTC),
+                            )
+                        )
+                        review.status = ReviewStatusEnum.REPLIED
+                        review.status_changed_at = datetime.now(UTC)
+                        result.replies_posted += 1
+
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            result.errors.append(
+                f"{google_account.email} / {location.get('title') or location.get('name') or 'unknown location'}: {_format_sync_error(exc)}"
+            )
+
     return result
 
 
-async def sync_all_google_accounts(db: Session, tenant_id) -> SyncResult:
+async def sync_all_google_accounts(db: Session, tenant_id, user_id=None, role=None) -> SyncResult:
     accounts = db.scalars(
         select(GoogleAccount).where(
             GoogleAccount.tenant_id == tenant_id,
@@ -451,7 +556,7 @@ async def sync_all_google_accounts(db: Session, tenant_id) -> SyncResult:
     aggregate = SyncResult()
     for google_account in accounts:
         try:
-            result = await sync_google_account(db, google_account)
+            result = await sync_google_account(db, google_account, user_id=user_id, role=role)
             aggregate.connected_accounts += result.connected_accounts
             aggregate.synced_locations += result.synced_locations
             aggregate.synced_reviews += result.synced_reviews
