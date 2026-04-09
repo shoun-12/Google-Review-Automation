@@ -1,6 +1,8 @@
-import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
+import { fetchMe, startDashboardGoogleLogin } from "../lib/api";
+import { saveStoredSession } from "../lib/session";
 import { useAuth } from "../app/AuthContext";
 import { useTheme } from "../app/ThemeContext";
 
@@ -32,13 +34,86 @@ function ThemeIcon({ theme }: { theme: "light" | "dark" }) {
   );
 }
 
+function GoogleMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+      <path
+        fill="#EA4335"
+        d="M12 10.2v3.95h5.62c-.25 1.3-1.03 2.4-2.1 3.15v2.62h3.39C20.92 18.47 22 15.55 22 12c0-.78-.07-1.53-.2-2.25H12Z"
+      />
+      <path
+        fill="#4285F4"
+        d="M12 22c2.7 0 4.97-.9 6.62-2.46l-3.39-2.62c-.94.63-2.15 1-3.23 1-2.48 0-4.58-1.67-5.34-3.92H3.16v2.7A9.98 9.98 0 0 0 12 22Z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M6.66 14c-.2-.62-.32-1.28-.32-2s.12-1.38.32-2V7.3H3.16A10 10 0 0 0 2 12c0 1.61.39 3.13 1.16 4.7L6.66 14Z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 5.08c1.47 0 2.78.51 3.82 1.5l2.87-2.87A9.65 9.65 0 0 0 12 2 9.98 9.98 0 0 0 3.16 7.3l3.5 2.7C7.42 6.75 9.52 5.08 12 5.08Z"
+      />
+    </svg>
+  );
+}
+
 export function LoginPage() {
   const { accessToken, login } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const handledGoogleCallback = useRef(false);
   const [email, setEmail] = useState("admin@example.com");
   const [password, setPassword] = useState("ChangeMe123!");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [googleSubmitting, setGoogleSubmitting] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const googleLogin = params.get("google_login");
+    if (!googleLogin || handledGoogleCallback.current) {
+      return;
+    }
+
+    handledGoogleCallback.current = true;
+
+    if (googleLogin === "error") {
+      setError(params.get("message") ?? "Google sign-in failed");
+      return;
+    }
+
+    if (googleLogin !== "success") {
+      return;
+    }
+
+    const accessTokenParam = params.get("access_token");
+    const refreshToken = params.get("refresh_token");
+    if (!accessTokenParam || !refreshToken) {
+      setError("Google sign-in response is missing session tokens");
+      return;
+    }
+
+    setGoogleSubmitting(true);
+    setError(null);
+
+    fetchMe(accessTokenParam)
+      .then((result) => {
+        saveStoredSession({
+          accessToken: accessTokenParam,
+          refreshToken,
+          user: result.user,
+          memberships: result.memberships,
+        });
+        navigate("/", { replace: true });
+      })
+      .catch(() => {
+        setError("Google sign-in completed, but the session could not be loaded");
+      })
+      .finally(() => {
+        setGoogleSubmitting(false);
+      });
+  }, [location.search, navigate]);
 
   if (accessToken) {
     return <Navigate to="/" replace />;
@@ -54,6 +129,18 @@ export function LoginPage() {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleGoogleLogin() {
+    setError(null);
+    setGoogleSubmitting(true);
+    try {
+      const response = await startDashboardGoogleLogin();
+      window.location.assign(response.authorization_url);
+    } catch (err) {
+      setGoogleSubmitting(false);
+      setError(err instanceof Error ? err.message : "Google sign-in failed");
     }
   }
 
@@ -92,7 +179,24 @@ export function LoginPage() {
           <p className="mt-3 text-sm leading-7 text-ink/60">
             Use this page for both Master Admin and Local Admin accounts.
           </p>
-          <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
+
+          <button
+            type="button"
+            onClick={handleGoogleLogin}
+            disabled={googleSubmitting}
+            className="mt-6 flex w-full items-center justify-center gap-3 rounded-2xl border border-ink/10 bg-sand/40 px-5 py-4 text-sm font-medium text-ink transition hover:border-pine hover:bg-pine/5 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            <GoogleMark />
+            {googleSubmitting ? "Redirecting..." : "Continue with Google"}
+          </button>
+
+          <div className="my-6 flex items-center gap-3 text-xs uppercase tracking-[0.25em] text-ink/30">
+            <span className="h-px flex-1 bg-ink/10" />
+            <span>Or</span>
+            <span className="h-px flex-1 bg-ink/10" />
+          </div>
+
+          <form className="space-y-5" onSubmit={handleSubmit}>
             <label className="block">
               <span className="mb-2 block text-sm uppercase tracking-[0.2em] text-ink/55">
                 Email

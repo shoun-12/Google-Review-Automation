@@ -34,10 +34,10 @@ class UserCreateRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
+    email: str | None = None
     full_name: str | None = None
     phone_number: str | None = None
     role: str | None = None
     email_alerts_enabled: bool | None = None
     whatsapp_alerts_enabled: bool | None = None
     is_active: bool | None = None
-

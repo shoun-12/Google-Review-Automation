@@ -2,6 +2,7 @@ from app.models.entities import AlertLog
 from app.models.entities import AuditLog
 from app.models.entities import GBPProfile
 from app.models.entities import GoogleAccount
+from app.models.entities import LoginOAuthState
 from app.models.entities import Membership
 from app.models.entities import OAuthState
 from app.models.entities import ProfileAssignment
@@ -17,6 +18,7 @@ __all__ = [
     "AuditLog",
     "GBPProfile",
     "GoogleAccount",
+    "LoginOAuthState",
     "Membership",
     "OAuthState",
     "ProfileAssignment",

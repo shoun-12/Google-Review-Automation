@@ -205,6 +205,14 @@ class OAuthState(TimestampedBase):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class LoginOAuthState(TimestampedBase):
+    __tablename__ = "login_oauth_states"
+
+    state_token: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    redirect_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
 class GoogleAccount(TimestampedBase):
     __tablename__ = "google_accounts"
     __table_args__ = (

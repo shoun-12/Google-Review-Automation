@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from app.core.config import settings
 from app.api.deps import require_master_admin
+from app.api.deps import get_current_membership
 from app.db.session import get_db
 from app.models.entities import Membership
 from app.schemas.google_accounts import GoogleAccountListResponse
@@ -55,11 +56,16 @@ def get_google_accounts(
 
 @router.post("/sync", response_model=GoogleSyncResponse)
 async def sync_google_accounts(
-    membership: Membership = Depends(require_master_admin),
+    membership: Membership = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> GoogleSyncResponse:
     try:
-        result = await sync_all_google_accounts(db, membership.tenant_id)
+        result = await sync_all_google_accounts(
+            db,
+            membership.tenant_id,
+            user_id=membership.user_id,
+            role=membership.role,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

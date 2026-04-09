@@ -11,6 +11,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class GoogleLoginStartResponse(BaseModel):
+    authorization_url: str
+
+
 class UserSummary(BaseModel):
     id: UUID
     email: str
